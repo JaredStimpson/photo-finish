@@ -19,6 +19,8 @@ class BatchReceipt:
     output: str
     settings: Settings
     error: str = ""
+    failure_reasons: tuple[tuple[str, int], ...] = ()
+    failure_examples: tuple[str, ...] = ()
 
 
 def _size(value):
@@ -61,7 +63,7 @@ def format_receipt(receipt):
         "",
         f"Status: {receipt.status}",
         f"Elapsed time: {_duration(receipt.elapsed)}",
-        f"JPGs found: {receipt.discovered}",
+        f"Images found: {receipt.discovered}",
         f"Items processed: {receipt.processed}",
         f"Saved: {receipt.saved}    Skipped: {receipt.skipped}    Failed: {receipt.failed}",
         "",
@@ -83,4 +85,10 @@ def format_receipt(receipt):
     ]
     if receipt.error:
         lines.extend(["", f"Batch error: {receipt.error}"])
-    return "\n".join(line for line in lines if line or line == "") + "\n"
+    if receipt.failure_reasons:
+        lines.extend(["", "FAILURE REASONS"])
+        lines.extend(f"{count} × {reason}" for reason, count in receipt.failure_reasons)
+    if receipt.failure_examples:
+        lines.extend(["", "FIRST FAILED FILES"])
+        lines.extend(receipt.failure_examples)
+    return "\n".join(lines) + "\n"

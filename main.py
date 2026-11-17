@@ -1,5 +1,6 @@
-"""Photo Finish: batch canvas and JPG reduction for Windows."""
+"""Photo Finish: batch canvas and photo reduction for Windows."""
 from pathlib import Path
+from collections import Counter
 import queue
 import threading
 import time
@@ -8,8 +9,9 @@ from tkinter import colorchooser, filedialog, messagebox, ttk
 
 from PIL import Image, ImageOps, ImageTk
 
-from processing import (Settings, image_layout, linked_dimension, list_jpgs,
-                        output_path, parse_ratio, process_image, sibling_output_folder, validate)
+from processing import (Settings, ensure_supported_image, image_layout, linked_dimension,
+                        list_images, normalize_image, output_path, parse_ratio,
+                        process_image, sibling_output_folder, validate)
 from receipt import BatchReceipt, format_receipt
 
 
@@ -35,13 +37,13 @@ class App(tk.Tk):
         self.manual_output = ""
         self.recursive = tk.BooleanVar(value=False)
         self.canvas_on = tk.BooleanVar(value=True)
-        self.canvas_mode = tk.StringVar(value="Canvas")
+        self.canvas_mode = tk.StringVar(value="Border")
         self.ratio = tk.StringVar(value="2:3")
         self.width = tk.StringVar(value="2000")
         self.height = tk.StringVar(value="3000")
         self.orientation = tk.StringVar(value="Auto")
         self.color = tk.StringVar(value="#FFFFFF")
-        self.expand = tk.BooleanVar(value=False)
+        self.expand = tk.BooleanVar(value=True)
         self.top_border = tk.StringVar(value="100")
         self.bottom_border = tk.StringVar(value="100")
         self.left_border = tk.StringVar(value="100")
@@ -57,8 +59,8 @@ class App(tk.Tk):
         self.metadata = tk.BooleanVar(value=False)
         self.suffix = tk.StringVar(value="_finished")
         self.print_receipt = tk.BooleanVar(value=True)
-        self.status = tk.StringVar(value="Select JPGs and review the settings.")
-        self.preview_info = tk.StringVar(value="Select an input folder to preview its first JPG.")
+        self.status = tk.StringVar(value="Select photos and review the settings.")
+        self.preview_info = tk.StringVar(value="Select an input folder to preview its first image.")
         self._layout()
         self.top_border.trace_add("write", lambda *_: self._sync_border("vertical"))
         self.left_border.trace_add("write", lambda *_: self._sync_border("horizontal"))
@@ -89,7 +91,7 @@ class App(tk.Tk):
         outer.pack(fill="both", expand=True)
         outer.bind("<Configure>", lambda event: self.status_label.configure(wraplength=max(200, event.width - 30)) if hasattr(self, "status_label") else None)
         ttk.Label(outer, text="Photo Finish", font=("Segoe UI", 18, "bold")).pack(anchor="w")
-        ttk.Label(outer, text="Finish photo sets with a solid-color canvas and optional bicubic JPG reduction.").pack(anchor="w", pady=(0, 8))
+        ttk.Label(outer, text="Finish photo sets with a solid-color canvas and optional bicubic reduction.").pack(anchor="w", pady=(0, 8))
         body = ttk.Frame(outer)
         body.pack(fill="both", expand=True)
         self.scroller = tk.Canvas(body, highlightthickness=0, borderwidth=0)
@@ -198,7 +200,7 @@ class App(tk.Tk):
         ttk.Label(self.border_frame, text="Adds these margins to each photo's current size.", wraplength=390).grid(row=6, column=0, columnspan=3, sticky="w", pady=(3, 0))
 
     def _reduction_controls(self):
-        self._check(self.reduction, 0, "Lossless: keep decoded photo pixels (PNG)", self.lossless, self._update_states)
+        self._check(self.reduction, 0, "Lossless PNG: no resizing or JPEG recompression", self.lossless, self._update_states)
         self.reduce_widget = self.add(ttk.Checkbutton(self.reduction, text="Downsize photos before adding the canvas", variable=self.reduce, command=self._update_states))
         self.reduce_widget.grid(row=1, column=0, columnspan=3, sticky="w", pady=3)
         ttk.Label(self.reduction, text="Longest edge (px)").grid(row=2, column=0, sticky="w")
@@ -359,7 +361,7 @@ class App(tk.Tk):
         return settings
 
     def choose_folder(self, variable):
-        folder = filedialog.askdirectory(title="Select input JPG folder" if variable is self.source else "Select output folder")
+        folder = filedialog.askdirectory(title="Select input photo folder" if variable is self.source else "Select output folder")
         if folder:
             variable.set(folder)
 
@@ -384,25 +386,24 @@ class App(tk.Tk):
             settings = self.settings()
             if self.preview_file is None:
                 if not self.source.get().strip():
-                    self.preview_info.set("Select an input folder to preview its first JPG.")
+                    self.preview_info.set("Select an input folder to preview its first image.")
                     return
                 source = Path(self.source.get().strip()).expanduser().resolve()
                 if not source.is_dir():
-                    self.preview_info.set("Select an input folder to preview its first JPG.")
+                    self.preview_info.set("Select an input folder to preview its first image.")
                     return
-                candidates = list_jpgs(source, source / "_no_output_", settings.recursive)
+                candidates = list_images(source, source / "_no_output_", settings.recursive)
                 self.preview_file = candidates[0] if candidates else None
             if self.preview_file is None:
-                self.preview_info.set("No JPGs found in the selected folder.")
+                self.preview_info.set("No supported image filenames found in the selected folder.")
                 return
             with Image.open(self.preview_file) as original:
-                if original.format != "JPEG":
-                    raise ValueError("First file is not a valid JPG.")
+                ensure_supported_image(self.preview_file, original)
                 source_size = original.size
                 if original.getexif().get(274, 1) in (5, 6, 7, 8):
                     source_size = (source_size[1], source_size[0])
                 original.draft("RGB", (1100, 1100))
-                image = ImageOps.exif_transpose(original).convert("RGB")
+                image = normalize_image(ImageOps.exif_transpose(original), settings.lossless)
             effective = source_size
             if settings.reduce:
                 factor = min(1.0, settings.max_edge / max(effective))
@@ -415,8 +416,11 @@ class App(tk.Tk):
             photo_size = (max(1, round(effective[0] * scale)), max(1, round(effective[1] * scale)))
             image.thumbnail(photo_size, Image.Resampling.LANCZOS)
             image = image.resize(photo_size, Image.Resampling.LANCZOS)
-            result = Image.new("RGB", shown_size, settings.color if settings.canvas else "#FFFFFF")
+            result = Image.new(image.mode, shown_size, settings.color if settings.canvas else "#FFFFFF")
             result.paste(image, (round(origin[0] * scale), round(origin[1] * scale)))
+            if result.mode == "RGBA":
+                background = Image.new("RGBA", result.size, settings.color if settings.canvas else "#FFFFFF")
+                result = Image.alpha_composite(background, result).convert("RGB")
             self.preview_ref = ImageTk.PhotoImage(result)
             panel.create_image(panel.winfo_width() // 2, panel.winfo_height() // 2, image=self.preview_ref)
             self.preview_info.set(f"{self.preview_file.name} · photo {effective[0]}×{effective[1]} → output {size[0]}×{size[1]} · {settings.format}")
@@ -461,7 +465,7 @@ class App(tk.Tk):
         self.receipt_widget.configure(state="disabled")
         self.cancel_button.configure(state="normal")
         self.progress.configure(value=0)
-        self.status.set("Finding JPGs…")
+        self.status.set("Finding images…")
         self.log.configure(state="normal")
         self.log.delete("1.0", "end")
         self.log.configure(state="disabled")
@@ -471,14 +475,19 @@ class App(tk.Tk):
         saved = skipped = failed = total_in = total_out = 0
         discovered = processed = 0
         batch_error = ""
+        failure_counts = Counter()
+        failure_examples = []
         try:
-            files = list_jpgs(source, output, settings.recursive)
+            files = list_images(source, output, settings.recursive)
             discovered = len(files)
             self.events.put(("total", len(files)))
+            output_names = Counter(str(output_path(path, source, output, settings)).casefold() for path in files)
             for index, path in enumerate(files, 1):
                 if self.stop.is_set():
                     break
-                destination = output_path(path, source, output, settings)
+                plain_path = output_path(path, source, output, settings)
+                destination = output_path(path, source, output, settings,
+                                          disambiguate=output_names[str(plain_path).casefold()] > 1)
                 try:
                     if destination.resolve() == path.resolve():
                         raise ValueError("Output would overwrite the input image.")
@@ -492,22 +501,30 @@ class App(tk.Tk):
                     self.events.put(("log", f"SKIPPED existing: {destination.name}"))
                 except Exception as exc:
                     failed += 1
-                    self.events.put(("log", f"ERROR {path.relative_to(source)}: {exc}"))
+                    reason = str(exc) or type(exc).__name__
+                    failure_counts[reason] += 1
+                    if len(failure_examples) < 3:
+                        failure_examples.append(f"{path.relative_to(source)}: {reason}")
+                    self.events.put(("log", f"ERROR {path.relative_to(source)}: {reason}"))
                 processed += 1
                 self.events.put(("progress", index, len(files)))
         except Exception as exc:
             batch_error = str(exc)
         status = ("Stopped" if batch_error else "Canceled" if self.stop.is_set() else
-                  "No JPGs found" if not discovered else "Finished with errors" if failed else "Finished")
+                  "No images found" if not discovered else "Finished with errors" if failed else "Finished")
         receipt = BatchReceipt(status=status, elapsed=time.perf_counter() - started,
                                discovered=discovered, processed=processed, saved=saved,
                                skipped=skipped, failed=failed, input_bytes=total_in,
                                output_bytes=total_out, source=str(source), output=str(output),
-                               settings=settings, error=batch_error)
+                               settings=settings, error=batch_error,
+                               failure_reasons=tuple(failure_counts.most_common(3)),
+                               failure_examples=tuple(failure_examples))
         sizes = f" · {total_in / 1048576:.1f} → {total_out / 1048576:.1f} MiB" if saved else ""
         summary = f"{status}: {saved} saved, {skipped} skipped, {failed} failed{sizes}"
         if batch_error:
             summary += f" · {batch_error}"
+        elif failed and not saved and failure_examples:
+            summary += f" · First error: {failure_examples[0]}"
         self.events.put(("done", summary, receipt if print_receipt else None))
 
     def poll(self):

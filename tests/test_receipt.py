@@ -66,6 +66,44 @@ class ReceiptTests(unittest.TestCase):
             self.assertEqual((receipt.processed, receipt.saved, receipt.skipped, receipt.failed), (3, 1, 1, 1))
             self.assertGreater(receipt.input_bytes, 0)
             self.assertGreater(receipt.output_bytes, 0)
+            self.assertIn("bad.jpg", format_receipt(receipt))
+            self.assertIn("FAILURE REASONS", format_receipt(receipt))
+
+    def test_oversize_jpg_failures_show_why_in_receipt_and_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, output = Path(directory) / "JPG", Path(directory) / "JPG_finished"
+            source.mkdir()
+            for index in range(2):
+                Image.new("RGB", (101, 151), "red").save(source / f"photo{index}.jpg")
+            worker = SimpleNamespace(events=Queue(), stop=Event())
+            settings = Settings(canvas_mode="Canvas", width=50, height=75, expand=False)
+            App.worker(worker, source, output, settings, perf_counter(), True)
+            events = []
+            while not worker.events.empty():
+                events.append(worker.events.get_nowait())
+            summary, receipt = events[-1][1:]
+            self.assertEqual((receipt.discovered, receipt.failed, receipt.saved), (2, 2, 0))
+            self.assertIn("First error: photo0.jpg: Photo 101×151 exceeds canvas", summary)
+            text = format_receipt(receipt)
+            self.assertIn("FAILURE REASONS", text)
+            self.assertIn("2 × Photo 101×151 exceeds canvas", text)
+            self.assertIn("FIRST FAILED FILES", text)
+            self.assertFalse(output.exists())
+
+    def test_same_stem_different_input_formats_both_save(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, output = Path(directory) / "input", Path(directory) / "output"
+            source.mkdir()
+            Image.new("RGB", (10, 10), "red").save(source / "photo.jpg")
+            Image.new("RGB", (10, 10), "blue").save(source / "photo.png")
+            worker = SimpleNamespace(events=Queue(), stop=Event())
+            App.worker(worker, source, output, Settings(canvas=False), perf_counter(), True)
+            events = []
+            while not worker.events.empty():
+                events.append(worker.events.get_nowait())
+            self.assertEqual((events[-1][2].discovered, events[-1][2].saved), (2, 2))
+            self.assertTrue((output / "photo_jpg_finished.png").exists())
+            self.assertTrue((output / "photo_png_finished.png").exists())
 
 
 if __name__ == "__main__":

@@ -7,6 +7,10 @@ import re
 
 from PIL import Image, ImageFilter, ImageOps
 
+INPUT_EXTENSIONS = frozenset({".jpg", ".jpeg", ".jpe", ".jfif", ".png",
+                              ".tif", ".tiff", ".bmp", ".webp", ".avif", ".gif"})
+INPUT_FORMATS = frozenset({"JPEG", "MPO", "PNG", "TIFF", "BMP", "WEBP", "AVIF", "GIF"})
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -78,7 +82,7 @@ def validate(settings):
         raise ValueError("Suffix contains characters Windows does not allow in filenames.")
 
 
-def list_jpgs(source, output, recursive):
+def list_images(source, output, recursive):
     """Snapshot inputs; never follow symlinks or traverse an output subtree."""
     files_found = []
     for root, dirs, names in os.walk(source, followlinks=False):
@@ -86,7 +90,7 @@ def list_jpgs(source, output, recursive):
                          and not (Path(root) / d).resolve().is_relative_to(output))
         for name in sorted(names):
             path = Path(root) / name
-            if path.suffix.lower() in (".jpg", ".jpeg") and not path.is_symlink():
+            if path.suffix.lower() in INPUT_EXTENSIONS and not path.is_symlink():
                 files_found.append(path)
         if not recursive:
             break
@@ -104,7 +108,8 @@ def canvas_size(settings, image_size):
     if image_size[0] <= width and image_size[1] <= height:
         return width, height
     if not settings.expand:
-        raise ValueError(f"Photo {image_size[0]}×{image_size[1]} exceeds canvas {width}×{height}; enable auto-expand or reduction.")
+        advice = "enable auto-expand or use Border mode" if settings.lossless else "enable auto-expand, use Border mode, or reduce the photo"
+        raise ValueError(f"Photo {image_size[0]}×{image_size[1]} exceeds canvas {width}×{height}; {advice}.")
     # Use integer multiples of the selected dimensions: exact ratio, no clipping.
     multiple = max(math.ceil(image_size[0] / width), math.ceil(image_size[1] / height))
     if width * multiple > 100000 or height * multiple > 100000:
@@ -129,10 +134,11 @@ def image_layout(settings, image_size):
     return size, origin
 
 
-def output_path(source_file, input_root, output_root, settings):
+def output_path(source_file, input_root, output_root, settings, disambiguate=False):
     relative = source_file.relative_to(input_root)
     ext = ".png" if settings.format == "PNG" else ".jpg"
-    return output_root / relative.parent / (relative.stem + settings.suffix + ext)
+    name = relative.stem + ("_" + relative.suffix[1:].lower() if disambiguate else "")
+    return output_root / relative.parent / (name + settings.suffix + ext)
 
 
 def sibling_output_folder(source, suffix):
@@ -146,18 +152,46 @@ def sibling_output_folder(source, suffix):
     return source.parent / (source.name + suffix)
 
 
+def ensure_supported_image(source, image):
+    """Recognize decoded raster formats and accept JPEG bytes despite odd format labels."""
+    if image.format not in INPUT_FORMATS:
+        with source.open("rb") as handle:
+            signature = handle.read(16)
+        if not signature.startswith(b"\xff\xd8\xff"):
+            raise ValueError(
+                f"Unsupported image data: Pillow reports {image.format!r}; "
+                f"first 16 bytes {signature.hex(' ')}."
+            )
+    frames = getattr(image, "n_frames", 1)
+    if frames > 1:
+        raise ValueError(f"Multi-frame image ({frames} frames); only single-frame images are supported.")
+
+
+def normalize_image(image, lossless):
+    """Keep 8-bit RGB(A) pixels; expand palette/grayscale for a colored border."""
+    if image.mode in ("RGB", "RGBA"):
+        return image
+    if image.mode in ("P", "PA", "LA"):
+        return image.convert("RGBA" if image.mode != "P" or "transparency" in image.info else "RGB")
+    if image.mode in ("L", "1"):
+        return image.convert("RGB")
+    if lossless:
+        raise ValueError(f"Lossless PNG cannot retain {image.mode} pixels in a colored canvas; uncheck Lossless to convert to RGB.")
+    return image.convert("RGB")
+
+
 def process_image(source, destination, settings):
     """Create output exclusively; errors never leave a partially written file."""
     validate(settings)
     if destination.exists():
         raise FileExistsError(f"Output already exists: {destination.name}")
     with Image.open(source) as original:
-        if original.format != "JPEG":
-            raise ValueError("Input is not a JPEG image.")
-        icc = original.info.get("icc_profile")
+        ensure_supported_image(source, original)
+        # A profile for CMYK or another converted color space would be invalid on RGB output.
+        icc = original.info.get("icc_profile") if original.mode in ("RGB", "RGBA", "P", "PA") else None
         image = ImageOps.exif_transpose(original)
         exif = image.getexif().tobytes() if settings.metadata else None
-        image = image.convert("RGB")
+        image = normalize_image(image, settings.lossless)
         initial_size = image.size
         if settings.reduce:
             scale = min(1.0, settings.max_edge / max(image.size))
@@ -167,7 +201,7 @@ def process_image(source, destination, settings):
                     image = image.filter(ImageFilter.UnsharpMask(radius=0.7, percent=80, threshold=3))
         if settings.canvas:
             size, origin = image_layout(settings, image.size)
-            canvas = Image.new("RGB", size, settings.color)
+            canvas = Image.new(image.mode, size, settings.color)
             canvas.paste(image, origin)
             image = canvas
         options = {}
@@ -176,6 +210,9 @@ def process_image(source, destination, settings):
         if exif:
             options["exif"] = exif
         if settings.format == "JPEG":
+            if image.mode == "RGBA":
+                background = Image.new("RGBA", image.size, settings.color)
+                image = Image.alpha_composite(background, image).convert("RGB")
             options.update(format="JPEG", quality=settings.quality, optimize=True, progressive=True, subsampling=2)
         else:
             options.update(format="PNG", compress_level=6)

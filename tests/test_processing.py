@@ -2,10 +2,13 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from PIL import Image
+from PIL import Image, features
 
-from processing import (Settings, canvas_size, image_layout, list_jpgs,
+from main import App
+from processing import (Settings, canvas_size, image_layout, list_images,
                         output_path, parse_ratio, process_image, sibling_output_folder)
 
 
@@ -59,7 +62,7 @@ class ProcessingTests(unittest.TestCase):
         output = self.source / "out"
         output.mkdir()
         (output / "already.jpg").write_bytes(b"not an input")
-        files = list_jpgs(self.source, output, True)
+        files = list_images(self.source, output, True)
         self.assertEqual(files, [self.jpg])
         self.assertEqual(output_path(self.jpg, self.source, output, Settings()), output / "sample_finished.png")
 
@@ -116,6 +119,134 @@ class ProcessingTests(unittest.TestCase):
             sibling_output_folder(self.source, "")
         with self.assertRaises(ValueError):
             sibling_output_folder(self.source, "../bad")
+
+    def test_jpeg_signature_allows_unusual_decoder_format_report(self):
+        real_open = Image.open
+
+        def unusual_format(path):
+            image = real_open(path)
+            image.format = "MPO"
+            return image
+
+        with patch("processing.Image.open", side_effect=unusual_format):
+            destination = self.root / "signature.png"
+            process_image(self.jpg, destination, Settings(canvas=False))
+        with Image.open(destination) as result:
+            self.assertEqual(result.size, (101, 151))
+
+    def test_mislabeled_png_is_processed_from_jpg_filename(self):
+        misleading = self.source / "misleading.jpg"
+        Image.new("RGB", (8, 8), "red").save(misleading, format="PNG")
+        destination = self.root / "normalized.png"
+        process_image(misleading, destination, Settings(canvas=False))
+        with Image.open(destination) as result:
+            self.assertEqual(result.getpixel((0, 0)), (255, 0, 0))
+
+    def test_other_static_formats_and_input_extension_filter(self):
+        for fmt, suffix in (("PNG", ".png"), ("TIFF", ".tiff"), ("BMP", ".bmp"), ("GIF", ".gif")):
+            image = self.source / f"photo_{fmt}{suffix}"
+            Image.new("RGB", (12, 10), "green").save(image, format=fmt)
+            target = self.root / f"result_{fmt}.png"
+            process_image(image, target, Settings(canvas=False))
+            with Image.open(target) as result:
+                self.assertEqual(result.size, (12, 10))
+        if features.check("webp"):
+            webp = self.source / "photo.webp"
+            Image.new("RGB", (12, 10), "green").save(webp, format="WEBP")
+            process_image(webp, self.root / "webp.png", Settings(canvas=False))
+        if features.check("avif"):
+            avif = self.source / "photo.avif"
+            Image.new("RGB", (12, 10), "green").save(avif, format="AVIF")
+            process_image(avif, self.root / "avif.png", Settings(canvas=False))
+        self.assertIn(self.jpg, list_images(self.source, self.root / "unused", False))
+
+    def test_rgba_png_preserves_alpha_and_jpeg_flattens_onto_fill(self):
+        source = self.source / "alpha.png"
+        image = Image.new("RGBA", (32, 16), (200, 30, 10, 0))
+        for y in range(16):
+            for x in range(16, 32):
+                image.putpixel((x, y), (10, 20, 30, 255))
+        image.save(source)
+        settings = Settings(canvas_mode="Border", top=1, left=1, color="#FFFFFF")
+        result = self.root / "alpha_finished.png"
+        process_image(source, result, settings)
+        with Image.open(result) as finished:
+            self.assertEqual(finished.mode, "RGBA")
+            self.assertEqual(finished.getpixel((1, 1)), (200, 30, 10, 0))
+            self.assertEqual(finished.getpixel((0, 0)), (255, 255, 255, 255))
+        jpeg = self.root / "flattened.jpg"
+        process_image(source, jpeg, replace(settings, lossless=False, format="JPEG", quality=95))
+        with Image.open(jpeg) as finished:
+            self.assertEqual(finished.mode, "RGB")
+            self.assertGreater(min(finished.getpixel((5, 8))), 200)
+        reduced = self.root / "reduced_alpha.png"
+        process_image(source, reduced, Settings(canvas=False, lossless=False, reduce=True,
+                                                max_edge=16, sharpen=True))
+        with Image.open(reduced) as finished:
+            self.assertEqual(finished.size, (16, 8))
+            self.assertEqual(finished.mode, "RGBA")
+
+    def test_palette_png_with_transparency_keeps_visible_and_alpha_pixels(self):
+        source = self.source / "palette.png"
+        image = Image.new("P", (2, 1))
+        image.putpalette([255, 0, 0, 0, 0, 255] + [0] * 762)
+        image.putdata([0, 1])
+        image.info["transparency"] = 1
+        image.save(source)
+        target = self.root / "palette_finished.png"
+        process_image(source, target, Settings(canvas=False))
+        with Image.open(target) as finished:
+            self.assertEqual(finished.mode, "RGBA")
+            self.assertEqual(finished.getpixel((0, 0)), (255, 0, 0, 255))
+            self.assertEqual(finished.getpixel((1, 0)), (0, 0, 255, 0))
+
+    def test_lossless_rejects_high_depth_instead_of_silent_conversion(self):
+        source = self.source / "high_depth.tiff"
+        Image.new("I;16", (3, 3), 1000).save(source)
+        with self.assertRaisesRegex(ValueError, "Lossless PNG cannot retain"):
+            process_image(source, self.root / "high_depth.png", Settings(canvas=False))
+
+    def test_multiframe_images_are_not_silently_truncated(self):
+        animated = self.source / "animated.gif"
+        Image.new("RGB", (3, 3), "red").save(animated, save_all=True,
+                                                append_images=[Image.new("RGB", (3, 3), "blue")], duration=50)
+        with self.assertRaisesRegex(ValueError, "Multi-frame image"):
+            process_image(animated, self.root / "animated.png", Settings(canvas=False))
+
+    def test_preview_uses_same_jpeg_signature_check(self):
+        class Panel:
+            def delete(self, *_):
+                pass
+
+            def winfo_width(self):
+                return 500
+
+            def winfo_height(self):
+                return 230
+
+            def create_image(self, *_, **__):
+                pass
+
+        class Info:
+            value = ""
+
+            def set(self, value):
+                self.value = value
+
+        info = Info()
+        stub = SimpleNamespace(preview_job=None, preview_canvas=Panel(), preview_ref=None,
+                               preview_file=self.jpg, preview_info=info,
+                               settings=lambda: Settings(canvas=False))
+        real_open = Image.open
+
+        def unusual_format(path):
+            image = real_open(path)
+            image.format = "MPO"
+            return image
+
+        with patch("main.Image.open", side_effect=unusual_format), patch("main.ImageTk.PhotoImage", side_effect=lambda im: im):
+            App.draw_preview(stub)
+        self.assertIn("sample.jpg · photo 101×151", info.value)
 
 
 if __name__ == "__main__":
