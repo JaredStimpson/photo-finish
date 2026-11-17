@@ -135,6 +135,17 @@ def output_path(source_file, input_root, output_root, settings):
     return output_root / relative.parent / (relative.stem + settings.suffix + ext)
 
 
+def sibling_output_folder(source, suffix):
+    """Derive the adjacent output directory without creating or touching it."""
+    if not source.name:
+        raise ValueError("Choose a named input folder for automatic output.")
+    if not suffix:
+        raise ValueError("Enter a nonempty image suffix for automatic output.")
+    if re.search(r'[<>:"/\\|?*\x00-\x1f]', suffix) or suffix.endswith((" ", ".")):
+        raise ValueError("Suffix contains characters Windows does not allow in filenames.")
+    return source.parent / (source.name + suffix)
+
+
 def process_image(source, destination, settings):
     """Create output exclusively; errors never leave a partially written file."""
     validate(settings)

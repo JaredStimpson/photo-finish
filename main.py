@@ -2,23 +2,27 @@
 from pathlib import Path
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
 from PIL import Image, ImageOps, ImageTk
 
-from processing import Settings, image_layout, linked_dimension, list_jpgs, output_path, parse_ratio, process_image, validate
+from processing import (Settings, image_layout, linked_dimension, list_jpgs,
+                        output_path, parse_ratio, process_image, sibling_output_folder, validate)
+from receipt import BatchReceipt, format_receipt
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("photo-finish · Batch canvas & JPG reduction")
+        self.title("Photo Finish · Batch canvas & JPG reduction")
         self.geometry("1060x850")
         self.minsize(600, 560)
         self.events = queue.Queue()
         self.stop = threading.Event()
         self.running = False
+        self.closing = False
         self.widgets = []
         self.preview_file = None
         self.preview_ref = None
@@ -27,6 +31,8 @@ class App(tk.Tk):
         self.active_dimension = "height"
         self.source = tk.StringVar()
         self.output = tk.StringVar()
+        self.auto_output = tk.BooleanVar(value=False)
+        self.manual_output = ""
         self.recursive = tk.BooleanVar(value=False)
         self.canvas_on = tk.BooleanVar(value=True)
         self.canvas_mode = tk.StringVar(value="Canvas")
@@ -50,6 +56,7 @@ class App(tk.Tk):
         self.format = tk.StringVar(value="PNG")
         self.metadata = tk.BooleanVar(value=False)
         self.suffix = tk.StringVar(value="_finished")
+        self.print_receipt = tk.BooleanVar(value=True)
         self.status = tk.StringVar(value="Select JPGs and review the settings.")
         self.preview_info = tk.StringVar(value="Select an input folder to preview its first JPG.")
         self._layout()
@@ -64,6 +71,9 @@ class App(tk.Tk):
                     self.right_border, self.same_top_bottom, self.same_sides, self.lossless):
             var.trace_add("write", lambda *_: self.schedule_preview())
         self.source.trace_add("write", lambda *_: self.schedule_preview(find_file=True))
+        self.source.trace_add("write", lambda *_: self._update_auto_output())
+        self.suffix.trace_add("write", lambda *_: self._update_auto_output())
+        self.output.trace_add("write", lambda *_: self._remember_manual_output())
         self.format.trace_add("write", lambda *_: self._update_states())
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.after(80, self.poll)
@@ -78,7 +88,7 @@ class App(tk.Tk):
         outer = ttk.Frame(self, padding=(12, 10))
         outer.pack(fill="both", expand=True)
         outer.bind("<Configure>", lambda event: self.status_label.configure(wraplength=max(200, event.width - 30)) if hasattr(self, "status_label") else None)
-        ttk.Label(outer, text="photo-finish", font=("Segoe UI", 18, "bold")).pack(anchor="w")
+        ttk.Label(outer, text="Photo Finish", font=("Segoe UI", 18, "bold")).pack(anchor="w")
         ttk.Label(outer, text="Finish photo sets with a solid-color canvas and optional bicubic JPG reduction.").pack(anchor="w", pady=(0, 8))
         body = ttk.Frame(outer)
         body.pack(fill="both", expand=True)
@@ -110,6 +120,8 @@ class App(tk.Tk):
         bar.pack(fill="x", pady=(8, 0))
         self.start_button = ttk.Button(bar, text="Start batch", command=self.start_batch)
         self.start_button.pack(side="left")
+        self.receipt_widget = ttk.Checkbutton(bar, text="Print receipt", variable=self.print_receipt)
+        self.receipt_widget.pack(side="left", padx=(12, 4))
         self.cancel_button = ttk.Button(bar, text="Cancel", command=self.cancel, state="disabled")
         self.cancel_button.pack(side="left", padx=8)
         self.progress = ttk.Progressbar(bar, orient="horizontal", mode="determinate")
@@ -128,7 +140,10 @@ class App(tk.Tk):
         entry = self.add(ttk.Entry(parent, textvariable=variable, width=width))
         entry.grid(row=row, column=1, sticky="ew", pady=4)
         if browse:
-            self.add(ttk.Button(parent, text="Browse…", command=lambda: self.choose_folder(variable))).grid(row=row, column=2, padx=(6, 0))
+            button = self.add(ttk.Button(parent, text="Browse…", command=lambda: self.choose_folder(variable)))
+            button.grid(row=row, column=2, padx=(6, 0))
+            if variable is self.output:
+                self.output_browse = button
         return entry
 
     def _check(self, parent, row, label, variable, cmd=None):
@@ -138,9 +153,11 @@ class App(tk.Tk):
 
     def _files(self):
         self._row(self.files, 0, "Input", self.source, browse=True)
-        self._row(self.files, 1, "Output", self.output, browse=True)
-        self._check(self.files, 2, "Include subfolders and preserve their structure", self.recursive)
-        self.add(ttk.Button(self.files, text="Refresh preview", command=lambda: self.schedule_preview(find_file=True))).grid(row=3, column=0, columnspan=3, sticky="w", pady=(5, 0))
+        self.output_widget = self._row(self.files, 1, "Output", self.output, browse=True)
+        self._check(self.files, 2, "Output folder beside input (input name + image suffix)",
+                    self.auto_output, self._update_auto_output)
+        self._check(self.files, 3, "Include subfolders and preserve their structure", self.recursive)
+        self.add(ttk.Button(self.files, text="Refresh preview", command=lambda: self.schedule_preview(find_file=True))).grid(row=4, column=0, columnspan=3, sticky="w", pady=(5, 0))
 
     def _canvas_controls(self):
         self.canvas_toggle = self._check(self.size_box, 0, "Add solid-color canvas / border", self.canvas_on, self._update_states)
@@ -272,6 +289,8 @@ class App(tk.Tk):
                 self.format.set("PNG")
         if self.running:
             return
+        self._state(self.output_widget, not self.auto_output.get())
+        self._state(self.output_browse, not self.auto_output.get())
         canvas_enabled = self.canvas_on.get()
         for widget in self.mode_widgets + [self.color_widget, self.color_picker]:
             self._state(widget, canvas_enabled)
@@ -297,6 +316,23 @@ class App(tk.Tk):
         self._state(self.sharpen_widget, not self.lossless.get() and self.reduce.get())
         self._state(self.format_widget, not self.lossless.get())
         self._state(self.quality_widget, not self.lossless.get() and self.format.get() == "JPEG")
+
+    def _remember_manual_output(self):
+        if not self.auto_output.get():
+            self.manual_output = self.output.get()
+
+    def _update_auto_output(self):
+        if self.auto_output.get():
+            try:
+                typed_source = self.source.get().strip()
+                folder = (sibling_output_folder(Path(typed_source).expanduser().resolve(), self.suffix.get())
+                          if typed_source else None)
+                self.output.set(str(folder) if folder else "")
+            except (OSError, ValueError):
+                self.output.set("")
+        else:
+            self.output.set(self.manual_output)
+        self._update_states()
 
     def settings(self):
         if self.canvas_on.get() and self.canvas_mode.get() == "Canvas":
@@ -390,14 +426,25 @@ class App(tk.Tk):
     def start_batch(self):
         try:
             settings = self.settings()
-            if not self.source.get().strip() or not self.output.get().strip():
-                raise ValueError("Choose input and output folders.")
+            if not self.source.get().strip():
+                raise ValueError("Choose an input folder.")
             source = Path(self.source.get().strip()).expanduser().resolve()
-            output = Path(self.output.get().strip()).expanduser().resolve()
             if not source.is_dir():
                 raise ValueError("Input folder does not exist.")
+            if self.auto_output.get():
+                raw_output = sibling_output_folder(source, settings.suffix)
+                if raw_output.is_symlink():
+                    raise ValueError("The automatic output folder is a link; choose a regular folder.")
+                output = raw_output.resolve()
+                self.output.set(str(output))
+            else:
+                if not self.output.get().strip():
+                    raise ValueError("Choose an output folder.")
+                output = Path(self.output.get().strip()).expanduser().resolve()
             if source == output:
                 raise ValueError("Select a separate output folder to protect the originals.")
+            if self.auto_output.get() and output.is_relative_to(source):
+                raise ValueError("Automatic output must be beside the input folder.")
             if output.exists() and not output.is_dir():
                 raise ValueError("Output path must be a folder.")
             if source.is_relative_to(output) and not settings.suffix and settings.format == "JPEG":
@@ -407,21 +454,26 @@ class App(tk.Tk):
             return
         self.stop.clear()
         self.running = True
+        started = time.perf_counter()
         for widget in self.widgets:
             widget.configure(state="disabled")
         self.start_button.configure(state="disabled")
+        self.receipt_widget.configure(state="disabled")
         self.cancel_button.configure(state="normal")
         self.progress.configure(value=0)
         self.status.set("Finding JPGs…")
         self.log.configure(state="normal")
         self.log.delete("1.0", "end")
         self.log.configure(state="disabled")
-        threading.Thread(target=self.worker, args=(source, output, settings), daemon=True).start()
+        threading.Thread(target=self.worker, args=(source, output, settings, started, self.print_receipt.get()), daemon=True).start()
 
-    def worker(self, source, output, settings):
+    def worker(self, source, output, settings, started, print_receipt):
         saved = skipped = failed = total_in = total_out = 0
+        discovered = processed = 0
+        batch_error = ""
         try:
             files = list_jpgs(source, output, settings.recursive)
+            discovered = len(files)
             self.events.put(("total", len(files)))
             for index, path in enumerate(files, 1):
                 if self.stop.is_set():
@@ -441,12 +493,22 @@ class App(tk.Tk):
                 except Exception as exc:
                     failed += 1
                     self.events.put(("log", f"ERROR {path.relative_to(source)}: {exc}"))
+                processed += 1
                 self.events.put(("progress", index, len(files)))
-            label = "Canceled" if self.stop.is_set() else ("No JPGs found" if not files else "Finished")
-            sizes = f" · {total_in / 1048576:.1f} → {total_out / 1048576:.1f} MB" if saved else ""
-            self.events.put(("done", f"{label}: {saved} saved, {skipped} skipped, {failed} failed{sizes}"))
         except Exception as exc:
-            self.events.put(("done", f"Batch stopped: {exc}"))
+            batch_error = str(exc)
+        status = ("Stopped" if batch_error else "Canceled" if self.stop.is_set() else
+                  "No JPGs found" if not discovered else "Finished with errors" if failed else "Finished")
+        receipt = BatchReceipt(status=status, elapsed=time.perf_counter() - started,
+                               discovered=discovered, processed=processed, saved=saved,
+                               skipped=skipped, failed=failed, input_bytes=total_in,
+                               output_bytes=total_out, source=str(source), output=str(output),
+                               settings=settings, error=batch_error)
+        sizes = f" · {total_in / 1048576:.1f} → {total_out / 1048576:.1f} MiB" if saved else ""
+        summary = f"{status}: {saved} saved, {skipped} skipped, {failed} failed{sizes}"
+        if batch_error:
+            summary += f" · {batch_error}"
+        self.events.put(("done", summary, receipt if print_receipt else None))
 
     def poll(self):
         for _ in range(100):
@@ -473,8 +535,42 @@ class App(tk.Tk):
                     widget.configure(state="normal")
                 self._update_states()
                 self.start_button.configure(state="normal")
+                self.receipt_widget.configure(state="normal")
                 self.cancel_button.configure(state="disabled")
+                if event[2] is not None and not self.closing:
+                    self.show_receipt(event[2])
         self.after(80, self.poll)
+
+    def show_receipt(self, receipt):
+        content = format_receipt(receipt)
+        popup = tk.Toplevel(self)
+        popup.title("Photo Finish · Batch receipt")
+        popup.geometry("680x510")
+        popup.minsize(420, 340)
+        popup.transient(self)
+        frame = ttk.Frame(popup, padding=14)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Batch receipt", font=("Segoe UI", 15, "bold")).pack(anchor="w", pady=(0, 8))
+        area = ttk.Frame(frame)
+        area.pack(fill="both", expand=True)
+        text = tk.Text(area, wrap="word", font=("Consolas", 10), padx=10, pady=10)
+        scroll = ttk.Scrollbar(area, orient="vertical", command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        text.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        text.insert("1.0", content)
+        text.configure(state="disabled")
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill="x", pady=(10, 0))
+
+        def copy_receipt():
+            popup.clipboard_clear()
+            popup.clipboard_append(content)
+            popup.update_idletasks()
+
+        ttk.Button(buttons, text="Copy receipt", command=copy_receipt).pack(side="left")
+        ttk.Button(buttons, text="Close", command=popup.destroy).pack(side="right")
+        popup.focus_set()
 
     def cancel(self):
         self.stop.set()
@@ -483,6 +579,7 @@ class App(tk.Tk):
 
     def close(self):
         if self.running:
+            self.closing = True
             self.cancel()
             self.after(100, self._close_when_idle)
         else:

@@ -5,7 +5,8 @@ from pathlib import Path
 
 from PIL import Image
 
-from processing import Settings, canvas_size, image_layout, list_jpgs, output_path, parse_ratio, process_image
+from processing import (Settings, canvas_size, image_layout, list_jpgs,
+                        output_path, parse_ratio, process_image, sibling_output_folder)
 
 
 class ProcessingTests(unittest.TestCase):
@@ -99,6 +100,22 @@ class ProcessingTests(unittest.TestCase):
             process_image(self.jpg, self.root / "wrong.jpg", Settings(canvas=False, format="JPEG"))
         with self.assertRaisesRegex(ValueError, "Lossless mode"):
             process_image(self.jpg, self.root / "wrong.png", Settings(canvas=False, reduce=True))
+
+    def test_automatic_sibling_folder_preserves_input_and_existing_outputs(self):
+        sibling = sibling_output_folder(self.source, "_finished")
+        self.assertEqual(sibling, self.root / "input_finished")
+        self.assertFalse(sibling.exists())
+        destination = output_path(self.jpg, self.source, sibling, Settings(canvas=False))
+        process_image(self.jpg, destination, Settings(canvas=False))
+        before = destination.read_bytes()
+        with self.assertRaises(FileExistsError):
+            process_image(self.jpg, destination, Settings(canvas=False))
+        self.assertEqual(destination.read_bytes(), before)
+        self.assertTrue(self.jpg.exists())
+        with self.assertRaises(ValueError):
+            sibling_output_folder(self.source, "")
+        with self.assertRaises(ValueError):
+            sibling_output_folder(self.source, "../bad")
 
 
 if __name__ == "__main__":
