@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from processing import Settings, canvas_size, list_jpgs, output_path, parse_ratio, process_image
+from processing import Settings, canvas_size, image_layout, list_jpgs, output_path, parse_ratio, process_image
 
 
 class ProcessingTests(unittest.TestCase):
@@ -40,7 +40,7 @@ class ProcessingTests(unittest.TestCase):
             canvas_size(replace(settings, expand=False), (201, 301))
 
     def test_reducer_jpeg_and_no_upscaling(self):
-        settings = Settings(canvas=False, reduce=True, max_edge=80, format="JPEG")
+        settings = Settings(canvas=False, lossless=False, reduce=True, max_edge=80, format="JPEG")
         dest = self.root / "reduced.jpg"
         before, after, _, _ = process_image(self.jpg, dest, settings)
         self.assertEqual(before, (101, 151))
@@ -80,6 +80,25 @@ class ProcessingTests(unittest.TestCase):
             self.assertEqual(result.size, (20, 30))
             self.assertEqual(result.getexif()[315], "Example camera")
             self.assertEqual(result.getexif().get(274, 1), 1)
+
+    def test_border_mode_links_pairs_and_keeps_source_pixels(self):
+        settings = Settings(canvas_mode="Border", top=13, bottom=99, left=7, right=99,
+                            same_top_bottom=True, same_sides=True, color="#FFFFFF")
+        self.assertEqual(image_layout(settings, (101, 151)), ((115, 177), (7, 13)))
+        target = self.root / "linked.png"
+        process_image(self.jpg, target, settings)
+        with Image.open(self.jpg) as source, Image.open(target) as result:
+            self.assertEqual(result.size, (115, 177))
+            self.assertEqual(result.crop((7, 13, 108, 164)).tobytes(), source.convert("RGB").tobytes())
+            self.assertEqual(result.getpixel((0, 0)), (255, 255, 255))
+        independent = replace(settings, same_top_bottom=False, same_sides=False, bottom=5, right=19)
+        self.assertEqual(image_layout(independent, (101, 151)), ((127, 169), (7, 13)))
+
+    def test_lossless_mode_rejects_recompression_and_resizing(self):
+        with self.assertRaisesRegex(ValueError, "Lossless mode"):
+            process_image(self.jpg, self.root / "wrong.jpg", Settings(canvas=False, format="JPEG"))
+        with self.assertRaisesRegex(ValueError, "Lossless mode"):
+            process_image(self.jpg, self.root / "wrong.png", Settings(canvas=False, reduce=True))
 
 
 if __name__ == "__main__":

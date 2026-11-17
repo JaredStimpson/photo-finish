@@ -11,6 +11,7 @@ from PIL import Image, ImageFilter, ImageOps
 @dataclass(frozen=True)
 class Settings:
     canvas: bool = True
+    canvas_mode: str = "Canvas"  # Canvas (target size) or Border (pixel margins)
     ratio_w: int = 2
     ratio_h: int = 3
     width: int = 2000
@@ -26,6 +27,13 @@ class Settings:
     recursive: bool = False
     suffix: str = "_finished"
     expand: bool = False
+    top: int = 100
+    bottom: int = 100
+    left: int = 100
+    right: int = 100
+    same_top_bottom: bool = True
+    same_sides: bool = True
+    lossless: bool = True
 
 
 def parse_ratio(value):
@@ -44,16 +52,24 @@ def linked_dimension(value, numerator, denominator):
 
 
 def validate(settings):
+    if settings.canvas_mode not in ("Canvas", "Border"):
+        raise ValueError("Choose Canvas or Border sizing.")
+    if settings.lossless and (settings.reduce or settings.format != "PNG"):
+        raise ValueError("Lossless mode requires PNG output with reduction turned off.")
     if settings.format not in ("PNG", "JPEG"):
         raise ValueError("Choose PNG or JPEG output.")
     if settings.orientation not in ("Auto", "Portrait", "Landscape"):
         raise ValueError("Choose Auto, Portrait, or Landscape orientation.")
     if not re.fullmatch(r"#[0-9a-fA-F]{6}", settings.color):
         raise ValueError("Border color must be a six-digit hex color, such as #FFFFFF.")
-    if not 1 <= settings.width <= 100000 or not 1 <= settings.height <= 100000:
-        raise ValueError("Canvas dimensions must be 1–100,000 pixels.")
-    if settings.ratio_w < 1 or settings.ratio_h < 1:
-        raise ValueError("Ratio components must be positive.")
+    if settings.canvas and settings.canvas_mode == "Canvas":
+        if not 1 <= settings.width <= 100000 or not 1 <= settings.height <= 100000:
+            raise ValueError("Canvas dimensions must be 1–100,000 pixels.")
+        if settings.ratio_w < 1 or settings.ratio_h < 1:
+            raise ValueError("Ratio components must be positive.")
+    if settings.canvas and settings.canvas_mode == "Border":
+        if any(not 0 <= value <= 100000 for value in (settings.top, settings.bottom, settings.left, settings.right)):
+            raise ValueError("Border widths must be 0–100,000 pixels.")
     if not 1 <= settings.max_edge <= 100000:
         raise ValueError("Longest edge must be 1–100,000 pixels.")
     if not 40 <= settings.quality <= 95:
@@ -96,6 +112,23 @@ def canvas_size(settings, image_size):
     return width * multiple, height * multiple
 
 
+def image_layout(settings, image_size):
+    """Return (output size, photo origin); photo pixels are never clipped."""
+    if not settings.canvas:
+        return image_size, (0, 0)
+    if settings.canvas_mode == "Border":
+        right = settings.left if settings.same_sides else settings.right
+        bottom = settings.top if settings.same_top_bottom else settings.bottom
+        size = (image_size[0] + settings.left + right, image_size[1] + settings.top + bottom)
+        origin = (settings.left, settings.top)
+    else:
+        size = canvas_size(settings, image_size)
+        origin = ((size[0] - image_size[0]) // 2, (size[1] - image_size[1]) // 2)
+    if max(size) > 100000 or size[0] * size[1] > 150_000_000:
+        raise ValueError("Output exceeds the 100,000 pixel edge or 150 megapixel limit.")
+    return size, origin
+
+
 def output_path(source_file, input_root, output_root, settings):
     relative = source_file.relative_to(input_root)
     ext = ".png" if settings.format == "PNG" else ".jpg"
@@ -122,11 +155,9 @@ def process_image(source, destination, settings):
                 if settings.sharpen:
                     image = image.filter(ImageFilter.UnsharpMask(radius=0.7, percent=80, threshold=3))
         if settings.canvas:
-            size = canvas_size(settings, image.size)
-            if size[0] * size[1] > 150_000_000:
-                raise ValueError("Canvas exceeds the 150 megapixel safety limit.")
+            size, origin = image_layout(settings, image.size)
             canvas = Image.new("RGB", size, settings.color)
-            canvas.paste(image, ((size[0] - image.width) // 2, (size[1] - image.height) // 2))
+            canvas.paste(image, origin)
             image = canvas
         options = {}
         if icc:

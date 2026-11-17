@@ -1,4 +1,4 @@
-# Photo Finish v1
+# photo-finish v1.1
 
 A Windows desktop tool for finishing JPG photo sets. It can downsize with bicubic filtering and optional light sharpening, then center the photo on a solid-color canvas. It scans `.jpg` and `.jpeg` files only. Source files are never intentionally overwritten; existing output files are skipped.
 
@@ -6,15 +6,16 @@ A Windows desktop tool for finishing JPG photo sets. It can downsize with bicubi
 
 1. Install Python 3 with Tcl/Tk enabled. From this folder, double-click `setup.bat` once (or use Command Prompt). It creates `.venv` and installs the packages in `requirements.txt`.
 2. Run `launch.bat` to open the application. Choose separate input and output folders.
-3. Choose the canvas ratio and enter either width or height; the other field updates. Auto orientation swaps the canvas per photo. If an image exceeds the canvas, enable **Expand canvas** or reduce it first. Expansion uses whole multiples of your canvas dimensions so the ratio stays exact.
-4. Choose **PNG** when decoded source pixels and exact border color must be preserved. Turn off photo reduction. Choose **JPEG** when a smaller, recompressed file is more useful. The JPEG quality slider only controls JPEG output.
-5. Run the batch. A preview shows the first JPG; the status and log report saved, skipped, and failed files. Cancel finishes the current image before stopping.
+3. Under **Canvas & border**, choose **Canvas mode** for a fixed output size: pick a ratio and enter either width or height; the other field updates. Auto orientation swaps the canvas per photo. If an image exceeds the canvas, enable **Expand canvas** or reduce it first. Expansion uses whole multiples of your canvas dimensions so the ratio stays exact.
+4. Choose **Border mode** to add pixel margins to each photo's existing dimensions. **Same top and bottom** and **Same sides** start checked; the bottom and right fields mirror the top and left fields and are disabled until unchecked. Border mode does not enforce an output aspect ratio.
+5. **Lossless** starts checked under Photo reduction: it disables reduction and forces PNG output, preserving every decoded source photo pixel exactly in the output. The PNG file itself will differ from the original JPG file. Uncheck it to enable bicubic reduction or JPEG export; JPEG output recompresses the photo. The JPEG quality slider only controls JPEG output.
+6. Run the batch. A preview shows the first JPG; the status and log report saved, skipped, and failed files. Cancel finishes the current image before stopping.
 
 EXIF orientation is applied before processing. ICC color profiles are copied to the output. Optional EXIF retention can include GPS location data. With metadata off, EXIF is omitted. The photo is centered; odd-pixel differences put the extra pixel on the right or bottom.
 
 ## Build a single Windows executable
 
-Run `build.bat` **on Windows**. It uses the project's `.venv` and PyInstaller to create `dist\PhotoFinish.exe`. Launch the EXE directly; it does not require the project's virtual environment. The scripts use their own folder as the working directory, so they also work when called from another folder. Python and Tk support must be installed on the build PC. PyInstaller builds the executable for the OS on which it runs; this source ZIP does not include a prebuilt Windows binary.
+Run `build.bat` **on Windows**. It uses the project's `.venv` and PyInstaller to create `dist\photo-finish.exe`. Launch the EXE directly; it does not require the project's virtual environment. The scripts use their own folder as the working directory, so they also work when called from another folder. Setup, launch, and build keep their command windows open at the end for diagnostics; nested setup calls continue without an extra pause. Python and Tk support must be installed on the build PC. PyInstaller builds the executable for the OS on which it runs; this source ZIP does not include a prebuilt Windows binary.
 
 ## Updating
 

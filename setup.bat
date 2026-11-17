@@ -20,7 +20,9 @@ if errorlevel 1 (
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt
 if errorlevel 1 goto :fail
 echo Setup complete.
+if /I not "%~1"=="--no-pause" pause
 exit /b 0
 :fail
 echo Setup failed. See the error above.
+if /I not "%~1"=="--no-pause" pause
 exit /b 1

@@ -7,13 +7,13 @@ from tkinter import colorchooser, filedialog, messagebox, ttk
 
 from PIL import Image, ImageOps, ImageTk
 
-from processing import Settings, canvas_size, linked_dimension, list_jpgs, output_path, parse_ratio, process_image, validate
+from processing import Settings, image_layout, linked_dimension, list_jpgs, output_path, parse_ratio, process_image, validate
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Photo Finish · Batch canvas & JPG reduction")
+        self.title("photo-finish · Batch canvas & JPG reduction")
         self.geometry("1060x850")
         self.minsize(600, 560)
         self.events = queue.Queue()
@@ -29,12 +29,20 @@ class App(tk.Tk):
         self.output = tk.StringVar()
         self.recursive = tk.BooleanVar(value=False)
         self.canvas_on = tk.BooleanVar(value=True)
+        self.canvas_mode = tk.StringVar(value="Canvas")
         self.ratio = tk.StringVar(value="2:3")
         self.width = tk.StringVar(value="2000")
         self.height = tk.StringVar(value="3000")
         self.orientation = tk.StringVar(value="Auto")
         self.color = tk.StringVar(value="#FFFFFF")
         self.expand = tk.BooleanVar(value=False)
+        self.top_border = tk.StringVar(value="100")
+        self.bottom_border = tk.StringVar(value="100")
+        self.left_border = tk.StringVar(value="100")
+        self.right_border = tk.StringVar(value="100")
+        self.same_top_bottom = tk.BooleanVar(value=True)
+        self.same_sides = tk.BooleanVar(value=True)
+        self.lossless = tk.BooleanVar(value=True)
         self.reduce = tk.BooleanVar(value=False)
         self.max_edge = tk.StringVar(value="2560")
         self.sharpen = tk.BooleanVar(value=True)
@@ -45,16 +53,22 @@ class App(tk.Tk):
         self.status = tk.StringVar(value="Select JPGs and review the settings.")
         self.preview_info = tk.StringVar(value="Select an input folder to preview its first JPG.")
         self._layout()
+        self.top_border.trace_add("write", lambda *_: self._sync_border("vertical"))
+        self.left_border.trace_add("write", lambda *_: self._sync_border("horizontal"))
         self.width.trace_add("write", lambda *_: self._link("width"))
         self.height.trace_add("write", lambda *_: self._link("height"))
         self.ratio.trace_add("write", lambda *_: self._link("ratio"))
         for var in (self.width, self.height, self.ratio, self.orientation, self.color,
-                    self.canvas_on, self.reduce, self.max_edge, self.expand, self.format):
+                    self.canvas_on, self.canvas_mode, self.reduce, self.max_edge, self.expand,
+                    self.format, self.top_border, self.bottom_border, self.left_border,
+                    self.right_border, self.same_top_bottom, self.same_sides, self.lossless):
             var.trace_add("write", lambda *_: self.schedule_preview())
         self.source.trace_add("write", lambda *_: self.schedule_preview(find_file=True))
+        self.format.trace_add("write", lambda *_: self._update_states())
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.after(80, self.poll)
         self.after(150, self._adapt)
+        self._update_states()
 
     def add(self, widget):
         self.widgets.append(widget)
@@ -64,7 +78,7 @@ class App(tk.Tk):
         outer = ttk.Frame(self, padding=(12, 10))
         outer.pack(fill="both", expand=True)
         outer.bind("<Configure>", lambda event: self.status_label.configure(wraplength=max(200, event.width - 30)) if hasattr(self, "status_label") else None)
-        ttk.Label(outer, text="Photo Finish", font=("Segoe UI", 18, "bold")).pack(anchor="w")
+        ttk.Label(outer, text="photo-finish", font=("Segoe UI", 18, "bold")).pack(anchor="w")
         ttk.Label(outer, text="Finish photo sets with a solid-color canvas and optional bicubic JPG reduction.").pack(anchor="w", pady=(0, 8))
         body = ttk.Frame(outer)
         body.pack(fill="both", expand=True)
@@ -118,7 +132,9 @@ class App(tk.Tk):
         return entry
 
     def _check(self, parent, row, label, variable, cmd=None):
-        self.add(ttk.Checkbutton(parent, text=label, variable=variable, command=cmd)).grid(row=row, column=0, columnspan=3, sticky="w", pady=3)
+        widget = self.add(ttk.Checkbutton(parent, text=label, variable=variable, command=cmd))
+        widget.grid(row=row, column=0, columnspan=3, sticky="w", pady=3)
+        return widget
 
     def _files(self):
         self._row(self.files, 0, "Input", self.source, browse=True)
@@ -127,30 +143,61 @@ class App(tk.Tk):
         self.add(ttk.Button(self.files, text="Refresh preview", command=lambda: self.schedule_preview(find_file=True))).grid(row=3, column=0, columnspan=3, sticky="w", pady=(5, 0))
 
     def _canvas_controls(self):
-        self._check(self.size_box, 0, "Add solid-color canvas", self.canvas_on)
-        ttk.Label(self.size_box, text="Ratio (W:H)").grid(row=1, column=0, sticky="w")
-        self.add(ttk.Combobox(self.size_box, textvariable=self.ratio, values=("2:3", "3:2", "4:5", "5:4", "1:1", "16:9", "9:16"), width=10)).grid(row=1, column=1, sticky="w", pady=4)
-        self._row(self.size_box, 2, "Width (px)", self.width, width=12)
-        self._row(self.size_box, 3, "Height (px)", self.height, width=12)
-        ttk.Label(self.size_box, text="Orientation").grid(row=4, column=0, sticky="w")
-        self.add(ttk.Combobox(self.size_box, textvariable=self.orientation, values=("Auto", "Portrait", "Landscape"), state="readonly", width=13)).grid(row=4, column=1, sticky="w", pady=4)
-        self._row(self.size_box, 5, "Border color", self.color, width=12)
-        self.add(ttk.Button(self.size_box, text="Pick…", command=self.pick_color)).grid(row=5, column=2, padx=(6, 0))
-        self._check(self.size_box, 6, "Expand canvas if a photo won't fit", self.expand)
-        ttk.Label(self.size_box, text="Width and height stay linked to the ratio; photos stay centered.", wraplength=390).grid(row=7, column=0, columnspan=3, sticky="w", pady=(3, 0))
+        self.canvas_toggle = self._check(self.size_box, 0, "Add solid-color canvas / border", self.canvas_on, self._update_states)
+        modes = ttk.Frame(self.size_box)
+        modes.grid(row=1, column=0, columnspan=3, sticky="w", pady=(3, 4))
+        self.mode_widgets = []
+        for name in ("Canvas", "Border"):
+            widget = self.add(ttk.Radiobutton(modes, text=f"{name} mode", variable=self.canvas_mode, value=name,
+                                              command=self._update_states))
+            widget.pack(side="left", padx=(0, 18))
+            self.mode_widgets.append(widget)
+        self.color_widget = self._row(self.size_box, 2, "Fill color", self.color, width=12)
+        self.color_picker = self.add(ttk.Button(self.size_box, text="Pick…", command=self.pick_color))
+        self.color_picker.grid(row=2, column=2, padx=(6, 0))
+        self.canvas_frame = ttk.Frame(self.size_box)
+        self.canvas_frame.grid(row=3, column=0, columnspan=3, sticky="ew")
+        self.canvas_frame.columnconfigure(1, weight=1)
+        ttk.Label(self.canvas_frame, text="Ratio (W:H)").grid(row=0, column=0, sticky="w")
+        self.add(ttk.Combobox(self.canvas_frame, textvariable=self.ratio, values=("2:3", "3:2", "4:5", "5:4", "1:1", "16:9", "9:16"), width=10)).grid(row=0, column=1, sticky="w", pady=4)
+        self._row(self.canvas_frame, 1, "Width (px)", self.width, width=12)
+        self._row(self.canvas_frame, 2, "Height (px)", self.height, width=12)
+        ttk.Label(self.canvas_frame, text="Orientation").grid(row=3, column=0, sticky="w")
+        self.orientation_widget = self.add(ttk.Combobox(self.canvas_frame, textvariable=self.orientation, values=("Auto", "Portrait", "Landscape"), state="readonly", width=13))
+        self.orientation_widget.grid(row=3, column=1, sticky="w", pady=4)
+        self._check(self.canvas_frame, 4, "Expand canvas if a photo won't fit", self.expand)
+        ttk.Label(self.canvas_frame, text="Target dimensions and ratio; the photo is centered.", wraplength=390).grid(row=5, column=0, columnspan=3, sticky="w", pady=(3, 0))
+        self.border_frame = ttk.Frame(self.size_box)
+        self.border_frame.grid(row=4, column=0, columnspan=3, sticky="ew")
+        self.border_frame.columnconfigure(1, weight=1)
+        self._row(self.border_frame, 0, "Top (px)", self.top_border, width=12)
+        self._row(self.border_frame, 1, "Bottom (px)", self.bottom_border, width=12)
+        self._row(self.border_frame, 2, "Left (px)", self.left_border, width=12)
+        self._row(self.border_frame, 3, "Right (px)", self.right_border, width=12)
+        self._check(self.border_frame, 4, "Same top and bottom", self.same_top_bottom, lambda: (self._sync_border("vertical"), self._update_states()))
+        self._check(self.border_frame, 5, "Same sides", self.same_sides, lambda: (self._sync_border("horizontal"), self._update_states()))
+        self.bottom_widget = next(w for w in self.border_frame.winfo_children() if isinstance(w, ttk.Entry) and str(w.cget("textvariable")) == str(self.bottom_border))
+        self.right_widget = next(w for w in self.border_frame.winfo_children() if isinstance(w, ttk.Entry) and str(w.cget("textvariable")) == str(self.right_border))
+        ttk.Label(self.border_frame, text="Adds these margins to each photo's current size.", wraplength=390).grid(row=6, column=0, columnspan=3, sticky="w", pady=(3, 0))
 
     def _reduction_controls(self):
-        self._check(self.reduction, 0, "Downsize photos before adding the canvas", self.reduce)
-        ttk.Label(self.reduction, text="Longest edge (px)").grid(row=1, column=0, sticky="w")
-        self.add(ttk.Combobox(self.reduction, textvariable=self.max_edge, values=("1600", "1920", "2560", "3000", "3840", "4096"), width=12)).grid(row=1, column=1, sticky="w", pady=4)
-        self._check(self.reduction, 2, "Light sharpen after downsizing", self.sharpen)
-        ttk.Label(self.reduction, text="Never upscales. Bicubic resize; sharpening runs only if resized.", wraplength=400).grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        self._check(self.reduction, 0, "Lossless: keep decoded photo pixels (PNG)", self.lossless, self._update_states)
+        self.reduce_widget = self.add(ttk.Checkbutton(self.reduction, text="Downsize photos before adding the canvas", variable=self.reduce, command=self._update_states))
+        self.reduce_widget.grid(row=1, column=0, columnspan=3, sticky="w", pady=3)
+        ttk.Label(self.reduction, text="Longest edge (px)").grid(row=2, column=0, sticky="w")
+        self.max_edge_widget = self.add(ttk.Combobox(self.reduction, textvariable=self.max_edge, values=("1600", "1920", "2560", "3000", "3840", "4096"), width=12))
+        self.max_edge_widget.grid(row=2, column=1, sticky="w", pady=4)
+        self.sharpen_widget = self.add(ttk.Checkbutton(self.reduction, text="Light sharpen after downsizing", variable=self.sharpen))
+        self.sharpen_widget.grid(row=3, column=0, columnspan=3, sticky="w", pady=3)
+        ttk.Label(self.reduction, text="Reduction never upscales. Sharpening runs only if resized.", wraplength=400).grid(row=4, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
     def _export_controls(self):
         ttk.Label(self.export, text="Format").grid(row=0, column=0, sticky="w")
-        self.add(ttk.Combobox(self.export, textvariable=self.format, values=("PNG", "JPEG"), state="readonly", width=10)).grid(row=0, column=1, sticky="w", pady=4)
+        self.format_widget = self.add(ttk.Combobox(self.export, textvariable=self.format, values=("PNG", "JPEG"), state="readonly", width=10))
+        self.format_widget.grid(row=0, column=1, sticky="w", pady=4)
         ttk.Label(self.export, text="JPEG quality").grid(row=1, column=0, sticky="w")
-        self.add(ttk.Scale(self.export, from_=40, to=95, variable=self.quality, orient="horizontal")).grid(row=1, column=1, sticky="ew", pady=4)
+        self.quality_widget = self.add(ttk.Scale(self.export, from_=40, to=95, variable=self.quality, orient="horizontal"))
+        self.quality_widget.grid(row=1, column=1, sticky="ew", pady=4)
         ttk.Label(self.export, textvariable=self.quality, width=3).grid(row=1, column=2, padx=(6, 0))
         self._row(self.export, 2, "Name suffix", self.suffix, width=16)
         self._check(self.export, 3, "Keep EXIF (may include location data)", self.metadata)
@@ -208,12 +255,67 @@ class App(tk.Tk):
         finally:
             self.link_guard = False
 
+    def _sync_border(self, axis):
+        if axis == "vertical" and self.same_top_bottom.get():
+            self.bottom_border.set(self.top_border.get())
+        elif axis == "horizontal" and self.same_sides.get():
+            self.right_border.set(self.left_border.get())
+
+    def _state(self, widget, enabled):
+        widget.configure(state=("readonly" if widget in (self.orientation_widget, self.format_widget) else "normal") if enabled else "disabled")
+
+    def _update_states(self):
+        if self.lossless.get():
+            if self.reduce.get():
+                self.reduce.set(False)
+            if self.format.get() != "PNG":
+                self.format.set("PNG")
+        if self.running:
+            return
+        canvas_enabled = self.canvas_on.get()
+        for widget in self.mode_widgets + [self.color_widget, self.color_picker]:
+            self._state(widget, canvas_enabled)
+        if canvas_enabled and self.canvas_mode.get() == "Border":
+            self.canvas_frame.grid_remove()
+            self.border_frame.grid()
+        else:
+            self.border_frame.grid_remove()
+            if canvas_enabled:
+                self.canvas_frame.grid()
+            else:
+                self.canvas_frame.grid_remove()
+        for widget in self.border_frame.winfo_children():
+            if widget in self.widgets:
+                self._state(widget, canvas_enabled and self.canvas_mode.get() == "Border")
+        self._state(self.bottom_widget, canvas_enabled and self.canvas_mode.get() == "Border" and not self.same_top_bottom.get())
+        self._state(self.right_widget, canvas_enabled and self.canvas_mode.get() == "Border" and not self.same_sides.get())
+        for widget in self.canvas_frame.winfo_children():
+            if widget in self.widgets:
+                self._state(widget, canvas_enabled and self.canvas_mode.get() == "Canvas")
+        self._state(self.reduce_widget, not self.lossless.get())
+        self._state(self.max_edge_widget, not self.lossless.get() and self.reduce.get())
+        self._state(self.sharpen_widget, not self.lossless.get() and self.reduce.get())
+        self._state(self.format_widget, not self.lossless.get())
+        self._state(self.quality_widget, not self.lossless.get() and self.format.get() == "JPEG")
+
     def settings(self):
-        rw, rh = parse_ratio(self.ratio.get())
-        settings = Settings(canvas=self.canvas_on.get(), ratio_w=rw, ratio_h=rh,
-                            width=int(self.width.get()), height=int(self.height.get()),
+        if self.canvas_on.get() and self.canvas_mode.get() == "Canvas":
+            rw, rh = parse_ratio(self.ratio.get())
+            width, height = int(self.width.get()), int(self.height.get())
+        else:
+            rw, rh, width, height = 2, 3, 2000, 3000
+        if self.canvas_on.get() and self.canvas_mode.get() == "Border":
+            top, bottom, left, right = (int(var.get()) for var in
+                                        (self.top_border, self.bottom_border, self.left_border, self.right_border))
+        else:
+            top = bottom = left = right = 0
+        settings = Settings(canvas=self.canvas_on.get(), canvas_mode=self.canvas_mode.get(),
+                            ratio_w=rw, ratio_h=rh, width=width, height=height,
                             orientation=self.orientation.get(), color=self.color.get().strip(),
-                            expand=self.expand.get(), reduce=self.reduce.get(), max_edge=int(self.max_edge.get()),
+                            expand=self.expand.get(), top=top, bottom=bottom, left=left, right=right,
+                            same_top_bottom=self.same_top_bottom.get(), same_sides=self.same_sides.get(),
+                            lossless=self.lossless.get(), reduce=self.reduce.get(),
+                            max_edge=2560 if self.lossless.get() else int(self.max_edge.get()),
                             sharpen=self.sharpen.get(), quality=round(self.quality.get()),
                             format=self.format.get(), metadata=self.metadata.get(),
                             recursive=self.recursive.get(), suffix=self.suffix.get())
@@ -269,9 +371,7 @@ class App(tk.Tk):
             if settings.reduce:
                 factor = min(1.0, settings.max_edge / max(effective))
                 effective = (max(1, round(effective[0] * factor)), max(1, round(effective[1] * factor)))
-            size = canvas_size(settings, effective) if settings.canvas else effective
-            if size[0] * size[1] > 150_000_000:
-                raise ValueError("Canvas exceeds the 150 megapixel safety limit.")
+            size, origin = image_layout(settings, effective)
             avail_w = max(100, panel.winfo_width() - 20)
             avail_h = max(100, panel.winfo_height() - 16)
             scale = min(avail_w / size[0], avail_h / size[1])
@@ -280,7 +380,7 @@ class App(tk.Tk):
             image.thumbnail(photo_size, Image.Resampling.LANCZOS)
             image = image.resize(photo_size, Image.Resampling.LANCZOS)
             result = Image.new("RGB", shown_size, settings.color if settings.canvas else "#FFFFFF")
-            result.paste(image, ((shown_size[0] - image.width) // 2, (shown_size[1] - image.height) // 2))
+            result.paste(image, (round(origin[0] * scale), round(origin[1] * scale)))
             self.preview_ref = ImageTk.PhotoImage(result)
             panel.create_image(panel.winfo_width() // 2, panel.winfo_height() // 2, image=self.preview_ref)
             self.preview_info.set(f"{self.preview_file.name} · photo {effective[0]}×{effective[1]} → output {size[0]}×{size[1]} · {settings.format}")
@@ -371,11 +471,7 @@ class App(tk.Tk):
                 self.status.set(event[1])
                 for widget in self.widgets:
                     widget.configure(state="normal")
-                # Comboboxes with fixed options should stay readonly.
-                for child in (self.size_box, self.export):
-                    for widget in child.winfo_children():
-                        if isinstance(widget, ttk.Combobox) and widget.cget("textvariable") in (str(self.orientation), str(self.format)):
-                            widget.configure(state="readonly")
+                self._update_states()
                 self.start_button.configure(state="normal")
                 self.cancel_button.configure(state="disabled")
         self.after(80, self.poll)
