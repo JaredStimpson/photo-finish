@@ -46,9 +46,10 @@ class ProcessingTests(unittest.TestCase):
     def test_reducer_jpeg_and_no_upscaling(self):
         settings = Settings(canvas=False, lossless=False, reduce=True, max_edge=80, format="JPEG")
         dest = self.root / "reduced.jpg"
-        before, after, _, _ = process_image(self.jpg, dest, settings)
+        before, after, _, _, frames = process_image(self.jpg, dest, settings)
         self.assertEqual(before, (101, 151))
         self.assertEqual(after, (54, 80))
+        self.assertEqual(frames, 1)
         with Image.open(dest) as result:
             self.assertEqual(result.size, (54, 80))
             self.assertEqual(result.format, "JPEG")
@@ -126,6 +127,7 @@ class ProcessingTests(unittest.TestCase):
         def unusual_format(path):
             image = real_open(path)
             image.format = "MPO"
+            image.n_frames = 2
             return image
 
         with patch("processing.Image.open", side_effect=unusual_format):
@@ -213,6 +215,23 @@ class ProcessingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Multi-frame image"):
             process_image(animated, self.root / "animated.png", Settings(canvas=False))
 
+    def test_multi_picture_jpeg_uses_primary_frame_and_reports_count(self):
+        real_open = Image.open
+
+        def windows_like_mpo(path):
+            image = real_open(path)
+            image.format = "MPO"
+            image.n_frames = 2
+            return image
+
+        target = self.root / "primary.png"
+        with patch("processing.Image.open", side_effect=windows_like_mpo):
+            _, size, _, _, frames = process_image(self.jpg, target, Settings(canvas=False))
+        self.assertEqual((size, frames), ((101, 151), 2))
+        with Image.open(target) as output:
+            with Image.open(self.jpg) as original:
+                self.assertEqual(output.tobytes(), original.convert("RGB").tobytes())
+
     def test_preview_uses_same_jpeg_signature_check(self):
         class Panel:
             def delete(self, *_):
@@ -242,11 +261,13 @@ class ProcessingTests(unittest.TestCase):
         def unusual_format(path):
             image = real_open(path)
             image.format = "MPO"
+            image.n_frames = 2
             return image
 
         with patch("main.Image.open", side_effect=unusual_format), patch("main.ImageTk.PhotoImage", side_effect=lambda im: im):
             App.draw_preview(stub)
         self.assertIn("sample.jpg · photo 101×151", info.value)
+        self.assertIn("first of 2 JPEG frames", info.value)
 
 
 if __name__ == "__main__":

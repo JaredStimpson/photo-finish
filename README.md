@@ -1,6 +1,6 @@
 # Photo Finish
 
-Photo Finish processes batches of JPG/JPEG, PNG, TIFF, BMP, WebP, GIF, and AVIF images (when the installed Pillow build supports the format). It can add a solid-color canvas or border, optionally downsize photos, and save PNG or JPEG output. Original photos are left in place; existing outputs are skipped. HEIC/HEIF and multi-frame images are not supported in this version.
+Photo Finish processes batches of JPG/JPEG, PNG, TIFF, BMP, WebP, GIF, and AVIF images (when the installed Pillow build supports the format). It can add a solid-color canvas or border, optionally downsize photos, and save PNG or JPEG output. Original photos are left in place; existing outputs are skipped. HEIC/HEIF and non-JPEG multi-frame images are not supported in this version.
 
 ## Use
 
@@ -13,5 +13,7 @@ Photo Finish processes batches of JPG/JPEG, PNG, TIFF, BMP, WebP, GIF, and AVIF 
 7. Use **Start batch** to process the folder. The preview shows the first JPG; the log shows each saved, skipped, or failed file. If files fail, the receipt shows common failure reasons and example filenames; the status line shows the first error when nothing was saved. **Cancel** stops after the current photo finishes.
 
 The receipt's size totals compare only successfully saved files with their input files. A negative space saving means the output uses more space, which is common with PNG. EXIF orientation is applied before processing. Compatible RGB color profiles are copied; the optional EXIF setting may retain location data. If two inputs share a base name (such as `photo.jpg` and `photo.png`), the output names include their input extensions so neither is lost. The PNG file differs from a source JPG even when its decoded photo pixels are unchanged.
+
+When a JPEG contains multiple picture frames, Photo Finish uses the first frame and records that in the preview, log, and receipt. Other frames are not exported.
 
 If a file is rejected as unsupported image data, the per-file log and receipt show its detected format and first file bytes. The app detects image data independently of a supported filename's extension.

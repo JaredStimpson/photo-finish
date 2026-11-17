@@ -38,6 +38,10 @@ class ReceiptTests(unittest.TestCase):
         self.assertIn("Status: Canceled", text)
         self.assertIn("Space saved: -1.00 MiB (-1,048,576 bytes) (-100.0%)", text)
 
+    def test_receipt_identifies_primary_jpeg_frames(self):
+        text = format_receipt(self.receipt(primary_frame_count=2))
+        self.assertIn("Multi-picture JPEGs: 2 saved using the first frame", text)
+
     def test_empty_batch_and_outer_error(self):
         text = format_receipt(self.receipt(status="Stopped", discovered=0,
                                            processed=0, saved=0, skipped=0, failed=0,

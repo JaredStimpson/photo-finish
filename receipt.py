@@ -19,6 +19,7 @@ class BatchReceipt:
     output: str
     settings: Settings
     error: str = ""
+    primary_frame_count: int = 0
     failure_reasons: tuple[tuple[str, int], ...] = ()
     failure_examples: tuple[str, ...] = ()
 
@@ -66,6 +67,8 @@ def format_receipt(receipt):
         f"Images found: {receipt.discovered}",
         f"Items processed: {receipt.processed}",
         f"Saved: {receipt.saved}    Skipped: {receipt.skipped}    Failed: {receipt.failed}",
+        *([f"Multi-picture JPEGs: {receipt.primary_frame_count} saved using the first frame"]
+          if receipt.primary_frame_count else []),
         "",
         "SIZE TOTALS · SAVED FILES ONLY",
         f"Before: {_size(receipt.input_bytes)}",

@@ -153,18 +153,22 @@ def sibling_output_folder(source, suffix):
 
 
 def ensure_supported_image(source, image):
-    """Recognize decoded raster formats and accept JPEG bytes despite odd format labels."""
-    if image.format not in INPUT_FORMATS:
+    """Return frame count; select primary JPEG frame, reject other sequences."""
+    frames = getattr(image, "n_frames", 1)
+    if image.format not in INPUT_FORMATS or frames > 1:
         with source.open("rb") as handle:
             signature = handle.read(16)
-        if not signature.startswith(b"\xff\xd8\xff"):
+        jpeg_bytes = signature.startswith(b"\xff\xd8\xff")
+        if image.format not in INPUT_FORMATS and not jpeg_bytes:
             raise ValueError(
                 f"Unsupported image data: Pillow reports {image.format!r}; "
                 f"first 16 bytes {signature.hex(' ')}."
             )
-    frames = getattr(image, "n_frames", 1)
+        if frames > 1 and not jpeg_bytes:
+            raise ValueError(f"Multi-frame image ({frames} frames); only JPEG's primary frame is supported.")
     if frames > 1:
-        raise ValueError(f"Multi-frame image ({frames} frames); only single-frame images are supported.")
+        image.seek(0)
+    return frames
 
 
 def normalize_image(image, lossless):
@@ -186,7 +190,7 @@ def process_image(source, destination, settings):
     if destination.exists():
         raise FileExistsError(f"Output already exists: {destination.name}")
     with Image.open(source) as original:
-        ensure_supported_image(source, original)
+        frames = ensure_supported_image(source, original)
         # A profile for CMYK or another converted color space would be invalid on RGB output.
         icc = original.info.get("icc_profile") if original.mode in ("RGB", "RGBA", "P", "PA") else None
         image = ImageOps.exif_transpose(original)
@@ -229,4 +233,4 @@ def process_image(source, destination, settings):
                 handle.close()
                 destination.unlink(missing_ok=True)
                 raise
-    return initial_size, image.size, source.stat().st_size, destination.stat().st_size
+    return initial_size, image.size, source.stat().st_size, destination.stat().st_size, frames

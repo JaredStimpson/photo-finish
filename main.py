@@ -398,7 +398,7 @@ class App(tk.Tk):
                 self.preview_info.set("No supported image filenames found in the selected folder.")
                 return
             with Image.open(self.preview_file) as original:
-                ensure_supported_image(self.preview_file, original)
+                frames = ensure_supported_image(self.preview_file, original)
                 source_size = original.size
                 if original.getexif().get(274, 1) in (5, 6, 7, 8):
                     source_size = (source_size[1], source_size[0])
@@ -423,7 +423,8 @@ class App(tk.Tk):
                 result = Image.alpha_composite(background, result).convert("RGB")
             self.preview_ref = ImageTk.PhotoImage(result)
             panel.create_image(panel.winfo_width() // 2, panel.winfo_height() // 2, image=self.preview_ref)
-            self.preview_info.set(f"{self.preview_file.name} · photo {effective[0]}×{effective[1]} → output {size[0]}×{size[1]} · {settings.format}")
+            frame_label = f" · first of {frames} JPEG frames" if frames > 1 else ""
+            self.preview_info.set(f"{self.preview_file.name} · photo {effective[0]}×{effective[1]} → output {size[0]}×{size[1]} · {settings.format}{frame_label}")
         except (ValueError, OSError) as exc:
             self.preview_info.set(f"Preview: {exc}")
 
@@ -473,6 +474,7 @@ class App(tk.Tk):
 
     def worker(self, source, output, settings, started, print_receipt):
         saved = skipped = failed = total_in = total_out = 0
+        primary_frames = 0
         discovered = processed = 0
         batch_error = ""
         failure_counts = Counter()
@@ -491,11 +493,15 @@ class App(tk.Tk):
                 try:
                     if destination.resolve() == path.resolve():
                         raise ValueError("Output would overwrite the input image.")
-                    _, final, before, after = process_image(path, destination, settings)
+                    _, final, before, after, frames = process_image(path, destination, settings)
                     saved += 1
+                    if frames > 1:
+                        primary_frames += 1
                     total_in += before
                     total_out += after
                     self.events.put(("log", f"{path.relative_to(source)} → {final[0]}×{final[1]} · {before / 1048576:.1f} → {after / 1048576:.1f} MB"))
+                    if frames > 1:
+                        self.events.put(("log", f"NOTE {path.relative_to(source)}: saved the first of {frames} JPEG frames"))
                 except FileExistsError:
                     skipped += 1
                     self.events.put(("log", f"SKIPPED existing: {destination.name}"))
@@ -517,6 +523,7 @@ class App(tk.Tk):
                                skipped=skipped, failed=failed, input_bytes=total_in,
                                output_bytes=total_out, source=str(source), output=str(output),
                                settings=settings, error=batch_error,
+                               primary_frame_count=primary_frames,
                                failure_reasons=tuple(failure_counts.most_common(3)),
                                failure_examples=tuple(failure_examples))
         sizes = f" · {total_in / 1048576:.1f} → {total_out / 1048576:.1f} MiB" if saved else ""
